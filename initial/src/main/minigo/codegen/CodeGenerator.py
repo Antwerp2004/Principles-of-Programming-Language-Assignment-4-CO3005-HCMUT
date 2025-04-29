@@ -1,12 +1,32 @@
 from AST import * 
 from Visitor import *
 from Utils import *
+from StaticCheck import *
+from StaticError import *
 from Emitter import Emitter
 from Frame import Frame
 from abc import ABC, abstractmethod
 from functools import reduce
 import operator
 
+
+class MType:
+    def __init__(self, partype, rettype):
+        self.partype = partype
+        self.rettype = rettype
+
+    def __str__(self):
+        return "MType([" + ",".join(str(x) for x in self.partype) + "]," + str(self.rettype) + ")"
+    
+
+class Symbol:
+    def __init__(self, name, mtype, value=None):
+        self.name = name
+        self.mtype = mtype
+        self.value = value
+
+    def __str__(self):
+        return "Symbol(" + str(self.name) + "," + str(self.mtype) + ("" if self.value is None else "," + str(self.value)) + ")"
 
 class Val(ABC):
     pass
@@ -141,22 +161,3 @@ class CodeGenerator(BaseVisitor,Utils):
         
     def visitIntLiteral(self, ast, o):
         return self.emit.emitPUSHICONST(ast.value, o['frame']), IntType()
-
-
-class MType:
-    def __init__(self, partype, rettype):
-        self.partype = partype
-        self.rettype = rettype
-
-    def __str__(self):
-        return "MType([" + ",".join(str(x) for x in self.partype) + "]," + str(self.rettype) + ")"
-    
-
-class Symbol:
-    def __init__(self, name, mtype, value=None):
-        self.name = name
-        self.mtype = mtype
-        self.value = value
-
-    def __str__(self):
-        return "Symbol(" + str(self.name) + "," + str(self.mtype) + ("" if self.value is None else "," + str(self.value)) + ")"

@@ -19,7 +19,7 @@ Label1:
 .end method
 
 .method public <init>()V
-.var 0 is this LMiniGoClass; from Label0 to Label1
+.var 0 is this Type from Label0 to Label1
 Label0:
 	aload_0
 	invokespecial java/lang/Object/<init>()V
