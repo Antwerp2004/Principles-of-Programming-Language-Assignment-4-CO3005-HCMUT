@@ -1,5 +1,5 @@
-from AST import *
-from Utils import *
+# from AST import *
+# from Utils import *
 from StaticCheck import *
 from StaticError import *
 import CodeGenerator as cgen
@@ -60,8 +60,8 @@ class Emitter():
         #in: Int or String
         #frame: Frame
         
-        frame.push()
         if isinstance(in_, int):
+            frame.push()
             i = in_
             if -1 <= i <= 5:
                 return self.jvm.emitICONST(i)
