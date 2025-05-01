@@ -52,9 +52,10 @@ class Symbol:
         self.name = name
         self.mtype = mtype
         self.value = value
+        self.const_value = None
 
     def __str__(self):
-        return "Symbol(" + str(self.name) + "," + str(self.mtype) + ("" if self.value is None else "," + str(self.value)) + ")"
+        return "Symbol(" + str(self.name) + "," + str(self.mtype) + ("" if self.value is None else "," + str(self.value)) + ("" if self.const_value is None else "," + str(self.const_value)) + ")"
 
 
 class Val(ABC):
@@ -202,8 +203,6 @@ class CodeGenerator(BaseVisitor,Utils):
                     global_symbols_map[decl.conName] = Symbol(decl.conName, const_type, const_value_evaluated)
 
             global_symbols_list = list(global_symbols_map.values())
-
-
             # --- Code Generation Phase ---
             self.main_emitter = Emitter(self.path + "/" + self.className + ".j")
             self.emit = self.main_emitter
@@ -252,8 +251,7 @@ class CodeGenerator(BaseVisitor,Utils):
 
 
     def visitVarDecl(self, ast, o):
-        var_name = ast.varName
-        sym = self.lookup(var_name, [j for i in o['env'] for j in i], lambda x: x.name)
+        sym = self.lookup(ast.varName, [j for i in o['env'] for j in i], lambda x: x.name)
         location = sym.value
         var_type = sym.mtype
 
@@ -265,7 +263,46 @@ class CodeGenerator(BaseVisitor,Utils):
                 self.emit.printout(init_code)
                 self.emit.printout(self.emit.emitWRITEVAR(var_name, var_type, index, frame))
 
+            else:
+                zero_value_code = ""
+                if isinstance(var_type, (IntType, BoolType)):
+                    zero_value_code = self.emit.emitPUSHICONST(0, frame)
+                elif isinstance(var_type, FloatType):
+                    zero_value_code = self.emit.emitPUSHFCONST("0.0", frame)
+                elif isinstance(var_type, StringType):
+                    zero_value_code = self.emit.emitPUSHCONST("", StringType(), frame)
+                elif isinstance(var_type, (ArrayType, StructType, InterfaceType)):
+                    zero_value_code = self.emit.emitPUSHNULL(frame)
+                else:
+                    print(f"Warning: Unknown type '{var_type}' for zero value initialization of variable '{ast.varName}'.")
+                    zero_value_code = self.emit.emitPUSHNULL(frame)
+                self.emit.printout(zero_value_code)
+                self.emit.printout(self.emit.emitWRITEVAR(ast.varName, var_type, index, frame))
 
+        return o
+    
+
+    def visitConstDecl(self, ast, o):
+        sym = self.lookup(ast.conName, [j for i in o['env'] for j in i], lambda x: x.name)
+        location = sym.value
+        const_type = sym.mtype
+        evaluated_value = sym.const_value
+
+        if isinstance(location, Index):
+            frame = o['frame']
+            index = location.value
+            code_to_push_value = ""
+            if isinstance(const_type, (IntType, FloatType, BoolType, StringType)):
+                code_to_push_value = self.emit.emitPUSHCONST(str(evaluated_value), const_type, frame)
+            elif isinstance(const_type, (ArrayType, StructType)):
+                code, _ = self.visit(evaluated_value, o)
+                code_to_push_value = code
+            elif evaluated_value is None:
+                code_to_push_value = self.emit.emitPUSHNULL(frame)
+            
+        self.emit.printout(code_to_push_value)
+        self.emit.printout(self.emit.emitWRITEVAR(ast.conName, const_type, index, frame))
+        return o
 
     def visitFuncDecl(self, ast, o):
         emitter = o['emitter']
@@ -277,7 +314,6 @@ class CodeGenerator(BaseVisitor,Utils):
         else:
             mtype = MType(list(map(lambda x: x.parType, ast.params)), ast.retType)
         
-        global_symbols_list = o['env'][0]
         emitter.printout(emitter.emitMETHOD(ast.name, mtype, True, frame))
         frame.enterScope(True)
         emitter.printout(emitter.emitLABEL(frame.getStartLabel(), frame))
@@ -307,27 +343,79 @@ class CodeGenerator(BaseVisitor,Utils):
         emitter.printout(emitter.emitRETURN(ast.retType, frame))
         emitter.printout(emitter.emitENDMETHOD(frame))
         frame.exitScope()
+
+
+    def visitIntType(self, ast, o):
+        return IntType()
     
 
-    def visitFuncCall(self, ast, o):
-        sym = next(filter(lambda x: x.name == ast.funName, o['env'][-1]),None)
-        env = o.copy()
-        env['isLeft'] = False
-        [self.emit.printout(self.visit(x, env)[0]) for x in ast.args]
-        self.emit.printout(self.emit.emitINVOKESTATIC(f"{sym.value.value}/{ast.funName}",sym.mtype, o['frame']))
-        return o
+    def visitFloatType(self, ast, o):
+        return FloatType()
+    
+
+    def visitStringType(self, ast, o):
+        return StringType()
+    
+
+    def visitBoolType(self, ast, o):
+        return BoolType()
+    
+
+    def visitVoidType(self, ast, o):
+        return VoidType()
+    
+
+    def visitArrayType(self, ast, o):
+        return ast
     
 
     def visitBlock(self, ast, o):
-        env = o.copy()
-        env['env'] = [[]] + env['env']
-        env['frame'].enterScope(False)
-        self.emit.printout(self.emit.emitLABEL(env['frame'].getStartLabel(), env['frame']))
-        env = reduce(lambda acc,e: self.visit(e,acc),ast.member,env)
-        self.emit.printout(self.emit.emitLABEL(env['frame'].getEndLabel(), env['frame']))
-        env['frame'].exitScope()
-        return o
+        frame = o['frame']
+        emitter = o['emitter']
+        local_symbols = []
+        env_for_block = {'env': [local_symbols] + o['env'], 'frame': frame, 'emitter': emitter}
+        frame.enterScope(True)
+        emitter.printout(emitter.emitLABEL(frame.getStartLabel(), frame))
+
+        statements_to_visit = []
+        for member in ast.member:
+            if isinstance(member, VarDecl):
+                var_type = member.varType if member.varType else self.visit(member.varInit, env_for_block)[1]
+                index = frame.getNewIndex()
+                local_symbols.append(Symbol(member.varName, var_type, Index(index)))
+                emitter.printout(emitter.emitVAR(index, member.varName, var_type, frame.getStartLabel(), frame.getEndLabel(), frame))
+
+            if isinstance(member, ConstDecl):
+                const_val_eval = self.cal_const(member.iniExpr, env_for_block)
+                const_type = self.visit(member.iniExpr, env_for_block)[1]
+                index = frame.getNewIndex()
+                local_symbols.append(Symbol(member.conName, const_type, Index(index), const_val_eval))
+                statements_to_visit.append(member)
+                emitter.printout(emitter.emitVAR(index, member.conName, const_type, frame.getStartLabel(), frame.getEndLabel(), frame))
+            
+
+    def visitBreak(self, ast, o):
+        frame = o['frame']
+        emitter = o['emitter']
+        emitter.printout(emitter.emitGOTO(frame.getEndLabel(), frame))
+
+
+    def visitContinue(self, ast, o):
+        frame = o['frame']
+        emitter = o['emitter']
+        emitter.printout(emitter.emitGOTO(frame.getContinueLabel(), frame))
+
     
+    def visitReturn(self, ast, o):
+        frame = o['frame']
+        emitter = o['emitter']
+        if ast.expr:
+            expr_code, expr_type = self.visit(ast.expr, o)
+            emitter.printout(expr_code)
+            emitter.printout(emitter.emitRETURN(expr_type, frame))
+        else:
+            emitter.printout(emitter.emitRETURN(VoidType(), frame))
+
 
     def visitId(self, ast, o):
         sym = next(filter(lambda x: x.name == ast.name, [j for i in o['env'] for j in i]),None)
@@ -336,6 +424,52 @@ class CodeGenerator(BaseVisitor,Utils):
         else:         
             return self.emit.emitGETSTATIC(f"{self.className}/{sym.name}",sym.mtype,o['frame']),sym.mtype
         
+    
+    def visitArrayCell(self, ast, o):
+        frame = o['frame']
+        emitter = o['emitter']
+        result_code = []
+        arr_code, arr_type = self.visit(ast.arr, o)
+        result_code.append(arr_code)
+
+        current_type = arr_type
+        for i, idx_expr in enumerate(ast.idx):
+            idx_code, _ = self.visit(idx_expr, o)
+            result_code.append(idx_code)
+            element_type_to_load = current_type.eleType
+            result_code.append(emitter.emitALOAD(element_type_to_load, frame))
+            current_type = element_type_to_load
+
+        final_element_type = current_type
+        return ''.join(result_code), final_element_type
+    
+
+    def visitFieldAccess(self, ast, o):
+        frame = o['frame']
+        emitter = o['emitter']
+        result_code = []
+        receiver_code, receiver_type = self.visit(ast.receiver, o)
+        result_code.append(receiver_code)
+
+        field_name = ast.field
+        field_info = self.lookup(field_name, receiver_type.elements, lambda x: x[0])
+        field_type = self.visit(field_info[1], o)
+
+        struct_class_name = emitter.getFullType(receiver_type)
+        qualified_field_name_for_jvm = f"{struct_class_name}/{field_name}"
+        result_code.append(emitter.emitGETFIELD(qualified_field_name_for_jvm, field_type, frame))
+        return ''.join(result_code), field_type
+
+
+    # Leave for later
+    # def visitFuncCall(self, ast, o):
+    #     sym = next(filter(lambda x: x.name == ast.funName, o['env'][-1]),None)
+    #     env = o.copy()
+    #     env['isLeft'] = False
+    #     [self.emit.printout(self.visit(x, env)[0]) for x in ast.args]
+    #     self.emit.printout(self.emit.emitINVOKESTATIC(f"{sym.value.value}/{ast.funName}",sym.mtype, o['frame']))
+    #     return o
+
 
     def visitIntLiteral(self, ast, o):
         return self.emit.emitPUSHICONST(ast.value, o['frame']), IntType()
@@ -345,9 +479,85 @@ class CodeGenerator(BaseVisitor,Utils):
         return self.emit.emitPUSHFCONST(str(ast.value), o['frame']), FloatType()
     
 
+    def visitStringLiteral(self, ast, o):
+        return self.emit.emitPUSHICONST(ast.value, o['frame']), StringType()    
+
+
     def visitBooleanLiteral(self, ast, o):
         return self.emit.emitPUSHICONST(str(ast.value), o['frame']), BoolType()
     
 
-    def visitStringLiteral(self, ast, o):
-        return self.emit.emitPUSHICONST(ast.value, o['frame']), StringType()
+    def visitArrayLiteral(self, ast, o):
+        frame = o['frame']
+        emitter = o['emitter']
+        result_code = []
+
+        # Generate code to push all dimension sizes onto the stack
+        dim_count = len(ast.dimens)
+        for dim_expr in ast.dimens:
+            dim_code, _ = self.visit(dim_expr, o)
+            result_code.append(dim_code)
+
+        # Allocate the array
+        if dim_count == 1:
+            result_code.append(emitter.emitNEWARRAY(ast.eleType))
+        else:
+            result_code.append(emitter.emitMULTIANEWARRAY(ArrayType(ast.dimens, ast.eleType), frame))
+        
+        # Initialize the innermost elements if ast.value is not empty
+        if ast.value:
+            temp_array_type = ArrayType(ast.dimens, ast.eleType)
+            temp_array_index = frame.getNewIndex()
+            result_code.append(emitter.emitWRITEVAR("temp_arr", temp_array_type, temp_array_index, frame))
+            innermost_dim_size = len(ast.value)
+            innermost_ele_type = ast.eleType
+
+            for i in range(innermost_dim_size):
+                result_code.append(emitter.emitREADVAR("temp_arr", temp_array_type, temp_array_index, frame))
+                result_code.append(emitter.emitPUSHICONST(i, frame))
+                element_code, _ = self.visit(ast.value[i], o)
+                result_code.append(element_code)
+                result_code.append(emitter.emitASTORE(innermost_ele_type, frame))
+            
+            result_code.append(emitter.emitREADVAR("temp_arr", temp_array_type, temp_array_index, frame))
+
+        return ''.join(result_code), ArrayType(ast.dimens, ast.eleType)
+    
+
+    def visitStructLiteral(self, ast, o):
+        frame = o['frame']
+        emitter = o['emitter']
+        result_code = []
+
+        struct_type_symbol = self.lookup(ast.name, [j for i in o['env'] for j in i], lambda x: x.name)
+        struct_type_ast = struct_type_symbol.mtype
+        struct_jvm_class_name = emitter.getJVMType(struct_type_ast)
+
+        # Allocate struct instance
+        result_code.append(emitter.emitNEW(struct_jvm_class_name, frame))
+        # Duplicate objectref for the constructor call
+        result_code.append(emitter.emitDUP(frame))
+        # Call the default constructor (<init>)
+        constructor_descriptor = emitter.getJVMType(MType([], VoidType())) # ()V
+        result_code.append(emitter.emitINVOKESPECIAL(frame, f"{struct_jvm_class_name}/<init>", MType([], VoidType())))
+
+        # Initialize fields if ast.elements is not empty
+        if ast.elements:
+            temp_obj_index = frame.getNewIndex()
+            result_code.append(emitter.emitWRITEVAR("temp_obj", struct_type_ast, temp_obj_index, frame))
+            for field_name, field_value in ast.elements:
+                result_code.append(emitter.emitREADVAR("temp_obj", struct_type_ast, temp_obj_index, frame))
+                field_value_code, _ = self.visit(field_value, o)
+                result_code.append(field_value_code)
+                
+                field_definition = self.lookup(field_name, struct_type_ast.elements, lambda x: x[0])
+                field_type_ast = field_definition[1]
+                qualified_field_name = f"{struct_jvm_class_name}/{field_name}"
+                result_code.append(emitter.emitPUTFIELD(qualified_field_name, field_type_ast, frame))
+            result_code.append(emitter.emitREADVAR("temp_obj", struct_type_ast, temp_obj_index, frame))
+        
+        return ''.join(result_code), struct_type_ast
+    
+
+    def visitNilLiteral(self, ast, o):
+        return self.emit.emitPUSHNULL(o['frame']), None

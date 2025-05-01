@@ -118,6 +118,12 @@ class Emitter():
             return self.jvm.emitLDC(in_)
         else:
             raise IllegalOperandException(in_)
+        
+    def emitPUSHNULL(self, frame):
+        # frame: Frame
+        # Stack: ..., -> ..., null
+        frame.push()
+        return self.jvm.emitPUSHNULL()
 
     ##############################################################
 
@@ -196,34 +202,6 @@ class Emitter():
             raise IllegalOperandException(f"Cannot READVAR {name} of type {inType}")
 
 
-    ''' generate the second instruction for array cell access
-    *
-    '''
-    # def emitREADVAR2(self, name, typ, frame):
-    #     #name: String
-    #     #typ: Type
-    #     #frame: Frame
-    #     """
-    #     After pushing arrayref and index, load the element:
-    #     ..., arrayref, index -> ..., value
-    #     """
-    #     # consume arrayref and index
-    #     frame.pop()
-    #     frame.pop()
-    #     # now push the loaded element
-    #     frame.push()
-
-    #     # dispatch on the element type
-    #     if isinstance(typ, (IntType, BoolType)):
-    #         return self.jvm.emitIALOAD()
-    #     elif isinstance(typ, FloatType):
-    #         return self.jvm.emitFALOAD()
-    #     elif isinstance(typ, (StringType, ArrayType, StructType, InterfaceType)):
-    #         return self.jvm.emitAALOAD()
-    #     else:
-    #         raise IllegalOperandException(f"Cannot READVAR2 {name} of element type {typ}")
-
-
     '''
     *   generate code to pop a value on top of the operand stack and store it to a block-scoped variable.
     *   @param name the symbol entry of the variable.
@@ -244,29 +222,6 @@ class Emitter():
             return self.jvm.emitASTORE(index)
         else:
             raise IllegalOperandException(f"Cannot WRITEVAR {name} of type {inType}")
-
-
-    ''' generate the second instruction for array cell access
-    *
-    '''
-    # def emitWRITEVAR2(self, name, typ, frame):
-    #     #name: String
-    #     #typ: Type
-    #     #frame: Frame
-
-    #     # pop value, index, and arrayref
-    #     frame.pop()
-    #     frame.pop()
-    #     frame.pop()
-        
-    #     if isinstance(typ, (IntType, BoolType)):
-    #         return self.jvm.emitIASTORE()
-    #     elif isinstance(typ, FloatType):
-    #         return self.jvm.emitFASTORE()
-    #     elif isinstance(typ, (StringType, ArrayType, StructType, InterfaceType)):
-    #         return self.jvm.emitAASTORE()
-    #     else:
-    #         raise IllegalOperandException(f"Cannot WRITEVAR2 {name} of element type {typ}")
 
 
     ''' generate the field (static) directive for a class mutable or immutable attribute.
@@ -472,15 +427,6 @@ class Emitter():
                 return self.jvm.emitIDIV()
             else:
                 return self.jvm.emitFDIV()
-
-
-    # def emitDIV(self, frame):
-    #     #frame: Frame
-
-    #     frame.pop()
-    #     frame.pop()
-    #     frame.push()
-    #     return self.jvm.emitIDIV()
 
 
     def emitMOD(self, frame):
@@ -722,7 +668,7 @@ class Emitter():
     *   @param index the index of the local variable.
     *   @param in the type of the local array variable.
     '''
-    def emitNEWARRAY(self, elementType, frame):
+    def emitNEWARRAY(self, elementType):
         # elementType: Type (the AST Type node of the elements in the array dimension)
         # frame: Frame
         # Before stack: ..., size -> After stack: ..., arrayref (after allocation opcode)
@@ -738,6 +684,18 @@ class Emitter():
             return self.jvm.emitANEWARRAY(self.getJVMType(elementType))
         else:
             raise IllegalOperandException(f"Cannot emitNEWARRAY for element type {elementType}")
+        
+
+    def emitMULTIANEWARRAY(self, arrayType, frame):
+        # arrayType: ArrayType (the AST node describing the full array type)
+        # frame: Frame
+        # Before stack: ..., size_dim1, size_dim2, ..., size_dimN -> After stack: ..., arrayref (after allocation
+        num_dims = len(arrayType.dimens)
+        jvm_array_descriptor = self.getJVMType(arrayType)
+        for _ in range(num_dims):
+            frame.pop()
+        frame.push()
+        return self.jvm.emitMULTIANEWARRAY(jvm_array_descriptor, num_dims)
 
 
     '''   generate code to initialize local array variables.
@@ -761,10 +719,8 @@ class Emitter():
 
         if num_dims == 1:
             result.append(self.emitNEWARRAY(arrayType.eleType, frame))
-        elif num_dims > 1:
-            result.append(self.jvm.emitMULTIANEWARRAY(jvm_array_descriptor, num_dims))
         else:
-            raise Exception(f"Invalid array dimension count ({num_dims}) for type {arrayType}")
+            result.append(self.jvm.emitMULTIANEWARRAY(jvm_array_descriptor, num_dims))
         
         frame.push()
         frame.pop()
@@ -828,6 +784,14 @@ class Emitter():
         #frame: Frame
         frame.pop()
         return self.jvm.emitPOP()
+    
+
+    def emitNEW(self, className, frame):
+        #className: String
+        #frame: Frame
+
+        frame.push()
+        return self.jvm.emitNEW(className)
 
 
     '''   generate code to exchange an integer on top of stack to a floating-point number.
