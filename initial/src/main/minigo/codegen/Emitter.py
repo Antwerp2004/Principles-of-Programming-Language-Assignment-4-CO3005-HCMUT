@@ -696,36 +696,22 @@ class Emitter():
             frame.pop()
         frame.push()
         return self.jvm.emitMULTIANEWARRAY(jvm_array_descriptor, num_dims)
+    
 
+    def emitIINC(self, index, amount, frame):
+        # index: int - The index of the local variable to increment
+        # amount: int - The amount to increment by (usually 1 or -1)
+        # frame: Frame - Passed for consistency, though iinc doesn't touch the operand stack
+        return self.jvm.emitIINC(index, amount)
+    
 
-    '''   generate code to initialize local array variables.
-    *   @param in the list of symbol entries corresponding to local array variable.    
-    '''
-    def emitALLOCATE_AND_STORE_LOCAL_ARRAY(self, arrayType: ArrayType, slotIndex: int, frame):
-        # arrayType: ArrayType (the AST node describing the full array type)
-        # slotIndex: int (the local variable index to store the allocated array)
+    def emitARRAYLENGTH(self, frame):
         # frame: Frame
-        ''' Assumes the sizes for all dimensions (from leftmost to rightmost) are already
-        pushed onto the operand stack BEFORE this method is called.
-        '''
-        # Before stack: ..., size_dim1, size_dim2, ..., size_dimN
-        # After stack: ... (arrayref is consumed by astore)
-        result = []
-        num_dims = len(arrayType.dimens)
-        jvm_array_descriptor = self.getJVMType(arrayType)
-        # Simulate popping the size(s) from the stack before allocation
-        for _ in range(num_dims):
-            frame.pop()
-
-        if num_dims == 1:
-            result.append(self.emitNEWARRAY(arrayType.eleType, frame))
-        else:
-            result.append(self.jvm.emitMULTIANEWARRAY(jvm_array_descriptor, num_dims))
-        
-        frame.push()
-        frame.pop()
-        result.append(self.jvm.emitASTORE(slotIndex))
-        return ''.join(result)
+        # Stack before: ..., arrayref
+        # Stack after:  ..., length (int)
+        frame.pop()  # Pop the arrayref
+        frame.push() # Push the integer length
+        return self.jvm.emitARRAYLENGTH()
 
 
     '''   generate code to jump to label if the value on top of operand stack is true.<p>
@@ -766,7 +752,25 @@ class Emitter():
 
         frame.pop()
         frame.pop()
-        return self.jvm.emitIFICMPLT(label)    
+        return self.jvm.emitIFICMPLT(label)
+    
+
+    def emitIFICMPGE(self, label, frame):
+        #label: Int
+        #frame: Frame
+
+        frame.pop()
+        frame.pop()
+        return self.jvm.emitIFICMPGE(label)
+    
+
+    def emitIFICMPLE(self, label, frame):
+        #label: Int
+        #frame: Frame
+
+        frame.pop()
+        frame.pop()
+        return self.jvm.emitIFICMPLE(label)
 
 
     '''   generate code to duplicate the value on the top of the operand stack.<p>

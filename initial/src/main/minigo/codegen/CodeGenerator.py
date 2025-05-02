@@ -8,36 +8,6 @@ from functools import reduce
 import operator
 
 
-ops = {
-    # Unary operators (right-to-left associativity)
-    '!': operator.not_,      # logical NOT
-    '-u': operator.neg,      # unary minus
-    
-    # Binary operators with precedence 3 (left-to-right)
-    '*': operator.mul,
-    '/': operator.truediv,
-    '%': operator.mod,
-    
-    # Binary operators with precedence 4 (left-to-right)
-    '+': operator.add,
-    '-': operator.sub,
-    
-    # Binary comparison operators with precedence 5 (left-to-right)
-    '==': operator.eq,
-    '!=': operator.ne,
-    '<': operator.lt,
-    '<=': operator.le,
-    '>': operator.gt,
-    '>=': operator.ge,
-    
-    # Logical AND with precedence 6 (left-to-right)
-    '&&': lambda a, b: a and b,
-    
-    # Logical OR with precedence 7 (left-to-right)
-    '||': lambda a, b: a or b,
-}
-
-
 class MType:
     def __init__(self, partype, rettype):
         self.partype = partype
@@ -52,7 +22,6 @@ class Symbol:
         self.name = name
         self.mtype = mtype
         self.value = value
-        self.const_value = None
 
     def __str__(self):
         return "Symbol(" + str(self.name) + "," + str(self.mtype) + ("" if self.value is None else "," + str(self.value)) + ("" if self.const_value is None else "," + str(self.const_value)) + ")"
@@ -69,10 +38,10 @@ class Index(Val):
 
 
 class CName(Val):
-    def __init__(self, value,isStatic=True):
+    def __init__(self, value, isStatic=True):
         #value: String
-        self.isStatic = isStatic
         self.value = value
+        self.isStatic = isStatic
 
 
 class ClassType(Type):
@@ -88,7 +57,6 @@ class CodeGenerator(BaseVisitor,Utils):
         self.astTree = None
         self.path = None
         self.emit = None
-        self.main_emitter = None
 
 
     def init(self):
@@ -114,154 +82,126 @@ class CodeGenerator(BaseVisitor,Utils):
         gl = self.init()
         self.astTree = ast
         self.path = dir_
-        # self.emit = Emitter(dir_ + "/" + self.className + ".j")
-        self.visit(ast, gl)
-    
-
-    def cal_const(self, ast, o):
-        if isinstance(ast, BinaryOp):
-            if ast.op in ['+', '-', '*', '%', '==', '!=', '<', '>', '<=', '>=', '&&', '||']:
-                return ops[ast.op](self.cal_const(ast.left, o), self.cal_const(ast.right, o))
-            elif ast.op == '/':
-                left_val = self.cal_const(ast.left, o)
-                right_val = self.cal_const(ast.right, o)
-                if isinstance(left_val, IntLiteral) and isinstance(right_val, IntLiteral):
-                    return self.cal_const(ast.left, o) // self.cal_const(ast.right, o)
-                else:
-                    return self.cal_const(ast.left, o) / self.cal_const(ast.right, o)
-        
-        elif isinstance(ast, UnaryOp):
-            if ast.op == '-':
-                return ops['-u'](self.cal_const(ast.body, o))
-            elif ast.op == '!':
-                return ops['!'](self.cal_const(ast.body, o))
-        
-        elif isinstance(ast, (IntLiteral, FloatLiteral, StringLiteral, BooleanLiteral)):
-            return ast.value
-        
-        elif isinstance(ast, Id):
-            res = self.lookup(ast.name, o['env'], lambda x: x.name)
-            return res.value
-        
-        else:
-            return ast
+        self.emit = Emitter(dir_ + "/" + self.className + ".j")
+        self.visit(ast, {'env': [gl]})
        
                
-    def generateStaticInitializer(self, global_vars_to_init_in_clinit, global_symbols_list):
+    def generateStaticInitializer(self, items_to_init, global_symbols_list, emitter):
         """Generates the <clinit> static initializer method."""
         frame = Frame("<clinit>", VoidType())  
-        self.emit.printout(self.emit.emitMETHOD("<clinit>", MType([], VoidType()), True, frame))
+        emitter.printout(emitter.emitMETHOD("<clinit>", MType([], VoidType()), True, frame))
         frame.enterScope(True) 
-        self.emit.printout(self.emit.emitLABEL(frame.getStartLabel(), frame))
+        emitter.printout(emitter.emitLABEL(frame.getStartLabel(), frame))
+        init_env = {'env': [global_symbols_list], 'frame': frame, 'emitter': emitter}
     
         # Generate code to initialize non-constant global variables and constants
-        for decl in global_vars_to_init_in_clinit:
-            if decl.varInit:
-                sym = self.lookup(decl.varName, global_symbols_list, lambda x: x.name)
-                init_code, _ = self.visit(decl.varInit, {'env': [global_symbols_list], 'frame': frame})
-                self.emit.printout(init_code)
-                self.emit.printout(self.emit.emitPUTSTATIC(f"{self.className}/{sym.name}", sym.mtype, frame))
+        for sym, decl_node in items_to_init:
+            init_expr = None
+            if isinstance(decl_node, VarDecl):
+                init_expr = decl_node.varInit
+            elif isinstance(decl_node, ConstDecl):
+                init_expr = decl_node.iniExpr
+            init_code, _ = self.visit(init_expr, init_env)
+            emitter.printout(init_code)
+            emitter.printout(self.emit.emitPUTSTATIC(f"{self.className}/{sym.name}", sym.mtype, frame))
 
-        self.emit.printout(self.emit.emitLABEL(frame.getEndLabel(), frame))
-        self.emit.printout(self.emit.emitRETURN(VoidType(), frame))  
-        self.emit.printout(self.emit.emitENDMETHOD(frame))  
+        emitter.printout(emitter.emitLABEL(frame.getEndLabel(), frame))
+        emitter.printout(emitter.emitRETURN(VoidType(), frame))  
+        emitter.printout(emitter.emitENDMETHOD(frame))  
         frame.exitScope()
         
 
     def visitProgram(self, ast, o):
-            global_symbols = o[:]
-            # Build the global symbol table first, including information about target files/classes
-            global_symbols_map = {}
-            for sym in global_symbols: # Add built-ins to map
-                global_symbols_map[sym.name] = sym
+        initial_built_ins = o['env'][0]
+        global_symbols_map = {}
+        for sym in initial_built_ins: global_symbols_map[sym.name] = sym
+        global_symbols_list = list(global_symbols_map.values())
+        sym_build_env = {'env': [global_symbols_list]}
 
-            # Process top-level declarations from the AST to populate the global symbol table
-            for decl in ast.decl:
-                if isinstance(decl, FuncDecl):
-                    # Top-level function (non-receiver) -> static method in MiniGoClass
-                    mtype = MType(list(map(lambda x: x.parType, decl.params)), decl.retType)
-                    global_symbols_map[decl.name] = Symbol(decl.name, mtype, CName(self.className, True))
+        for decl in ast.decl:
+            if isinstance(decl, FuncDecl):
+                param_types = [self.visit(p.parType, sym_build_env) for p in decl.params]
+                ret_type = self.visit(decl.retType, sym_build_env)
+                mtype = MType(param_types, ret_type)
+                global_symbols_map[decl.name] = Symbol(decl.name, mtype, CName(self.className, True))
 
-                elif isinstance(decl, MethodDecl):
-                    receiver_type_sym = global_symbols_map.get(decl.recType.name)
-                    # Method symbol: name, MType, CName(ReceiverClassName, isStatic=False)
-                    method_mtype = MType(list(map(lambda x: x.parType, decl.fun.params)), decl.fun.retType)
-                    global_symbols_map[decl.fun.name] = Symbol(decl.fun.name, method_mtype, CName(receiver_type_sym.name, False))
+            elif isinstance(decl, MethodDecl):
+                # maps to a separate class/interface file
+                receiver_type_sym = global_symbols_map.get(decl.recType.name)
+                method_mtype = MType(list(map(lambda x: x.parType, decl.fun.params)), decl.fun.retType)
+                global_symbols_map[decl.fun.name] = Symbol(decl.fun.name, method_mtype, CName(receiver_type_sym.name, False))
 
-                elif isinstance(decl, (StructType, InterfaceType)):
-                    # Type declaration -> maps to a separate class/interface file
-                    global_symbols_map[decl.name] = Symbol(decl.name, decl, CName(decl.name, True)) # Value is the class name itself
+            elif isinstance(decl, (StructType, InterfaceType)):
+                # Type declaration -> maps to a separate class/interface file
+                global_symbols_map[decl.name] = Symbol(decl.name, decl, CName(decl.name, True))
 
-                elif isinstance(decl, VarDecl):
-                    # Global variable -> static field in MiniGoClass
-                    global_symbols_map[decl.varName] = Symbol(decl.varName, decl.varType, CName(self.className, True))
+            elif isinstance(decl, VarDecl):
+                # Global variable -> static field in MiniGoClass
+                var_type = self.visit(decl.varType, sym_build_env) if decl.varType else None
+                if var_type is None and decl.varInit:
+                    var_type = self.visit(decl.varInit, o)[1]
+                global_symbols_map[decl.varName] = Symbol(decl.varName, var_type, CName(self.className, True))
 
-                elif isinstance(decl, ConstDecl):
-                    # Global constant -> static final field in MiniGoClass
-                    const_value_evaluated = self.cal_const(decl.iniExpr, {'env': [list(global_symbols_map.values())]})
-                    const_type = self.visit(decl.iniExpr, {'env': [list(global_symbols_map.values())]})[1]
-                    global_symbols_map[decl.conName] = Symbol(decl.conName, const_type, const_value_evaluated)
+            elif isinstance(decl, ConstDecl):
+                # Global constant -> static final field in MiniGoClass
+                const_type = self.visit(decl.iniExpr, sym_build_env)[1]
+                global_symbols_map[decl.conName] = Symbol(decl.conName, const_type, CName(self.className, True))
 
-            global_symbols_list = list(global_symbols_map.values())
-            # --- Code Generation Phase ---
-            self.main_emitter = Emitter(self.path + "/" + self.className + ".j")
-            self.emit = self.main_emitter
-            # Emit class directives for MiniGoClass.j
-            self.main_emitter.printout(self.main_emitter.emitPROLOG(self.className, "java.lang.Object"))
+        # --- Code Generation Phase ---
+        self.emit.printout(self.emit.emitPROLOG(self.className, "java.lang.Object"))
 
-            # Collect global variables/constants requiring .field directives in MiniGoClass
-            global_fields_to_emit = []
-            global_vars_to_init_in_clinit = [] # Subset of global vars needing explicit init
+        items_needing_clinit = []
+        for decl in ast.decl:
+            sym = None
+            is_const = False
+            init_expr = None
+            if isinstance(decl, (VarDecl, ConstDecl)):
+                name = decl.varName if isinstance(decl, VarDecl) else decl.conName
+                sym = global_symbols_map.get(name)
+                is_const = isinstance(decl, ConstDecl)
+                init_expr = decl.varInit if isinstance(decl, VarDecl) else decl.iniExpr
 
-            for decl in ast.decl: # Iterate through original declarations to get initializers
-                if isinstance(decl, VarDecl):
-                    sym = self.lookup(decl.varName, global_symbols_list, lambda x: x.name)
-                    if isinstance(sym.value, CName) and sym.value.value == self.className: # Only process globals in MiniGoClass
-                        global_fields_to_emit.append((sym.name, sym.mtype, False, None)) # name, type, isFinal=False, value=None
-                        if decl.varInit is not None:
-                            global_vars_to_init_in_clinit.append(decl) # Add original declaration to list for <clinit>
+            if sym and isinstance(sym.value, CName) and sym.value.value == self.className:
+                # This global belongs in MiniGoClass.j
+                is_final = is_const
+                # Emit static fields (.field directives) for global variables and constants in MiniGoClass
+                self.emit.printout(self.emit.emitATTRIBUTE(name, sym.mtype, True, is_final, None))
+                if init_expr:
+                    items_needing_clinit.append((sym, decl))
 
-                elif isinstance(decl, ConstDecl):
-                    const_sym = self.lookup(decl.conName, global_symbols_list, lambda x: x.name)
-                    global_fields_to_emit.append((const_sym.name, const_sym.mtype, True, const_sym.value)) # name, type, isFinal=True, value=const_value_evaluated
+        # Generate the static initializer <clinit> in MiniGoClass
+        self.generateStaticInitializer(items_needing_clinit, global_symbols_list, self.emit)
 
-            # Emit static fields (.field directives) for global variables and constants in MiniGoClass
-            for name, sym_type, is_final, value in global_fields_to_emit:
-                self.main_emitter.printout(self.main_emitter.emitATTRIBUTE(name, sym_type, True, is_final, value))
+        # Generate code for functions, structs, interfaces, and methods
+        for decl in ast.decl:
+            if isinstance(decl, FuncDecl):
+                self.visit(decl, {**sym_build_env, 'emitter': self.emit})
 
-            # Generate the static initializer <clinit> in MiniGoClass
-            self.generateStaticInitializer(global_vars_to_init_in_clinit, global_symbols_list)
+            elif isinstance(decl, StructType):
+                # Separate .j file for the struct
+                self.visit(decl, {**sym_build_env})
 
-            # Generate code for functions, structs, interfaces, and methods
-            for decl in ast.decl:
-                if isinstance(decl, FuncDecl):
-                    self.visitFuncDecl(decl, {'env': [global_symbols_list], 'frame': None, 'emitter': self.emit})
+            elif isinstance(decl, InterfaceType):
+                # Separate .j file for the interface
+                self.visit(decl, {**sym_build_env})
 
-                elif isinstance(decl, StructType):
-                    # Separate .j file for the struct
-                    self.visitStructType(decl, {'env': [global_symbols_list]}) # Pass global symbols
+            # MethodDecl nodes are visited from visitStructType or visitInterfaceType, NOT directly here.
 
-                elif isinstance(decl, InterfaceType):
-                    # Separate .j file for the interface
-                    self.visitInterfaceType(decl, {'env': [global_symbols_list]}) # Pass global symbols
-
-                # MethodDecl nodes are visited from visitStructType or visitInterfaceType, NOT directly here.
-
-            self.main_emitter.printout(self.main_emitter.emitEPILOG())
+        self.emit.printout(self.emit.emitEPILOG())
 
 
     def visitVarDecl(self, ast, o):
+        emitter = o['emitter']
+        frame = o['frame']
         sym = self.lookup(ast.varName, [j for i in o['env'] for j in i], lambda x: x.name)
         location = sym.value
         var_type = sym.mtype
 
         if isinstance(location, Index):
-            frame = o['frame']
             index = location.value
             if ast.varInit:
                 init_code, _ = self.visit(ast.varInit, o)
-                self.emit.printout(init_code)
-                self.emit.printout(self.emit.emitWRITEVAR(var_name, var_type, index, frame))
+                emitter.printout(init_code)
 
             else:
                 zero_value_code = ""
@@ -273,35 +213,24 @@ class CodeGenerator(BaseVisitor,Utils):
                     zero_value_code = self.emit.emitPUSHCONST("", StringType(), frame)
                 elif isinstance(var_type, (ArrayType, StructType, InterfaceType)):
                     zero_value_code = self.emit.emitPUSHNULL(frame)
-                else:
-                    print(f"Warning: Unknown type '{var_type}' for zero value initialization of variable '{ast.varName}'.")
-                    zero_value_code = self.emit.emitPUSHNULL(frame)
-                self.emit.printout(zero_value_code)
-                self.emit.printout(self.emit.emitWRITEVAR(ast.varName, var_type, index, frame))
+                emitter.printout(zero_value_code)
+
+            emitter.printout(self.emit.emitWRITEVAR(ast.varName, var_type, index, frame))
 
         return o
     
 
     def visitConstDecl(self, ast, o):
+        emitter = o['emitter']
+        frame = o['frame']
         sym = self.lookup(ast.conName, [j for i in o['env'] for j in i], lambda x: x.name)
         location = sym.value
         const_type = sym.mtype
-        evaluated_value = sym.const_value
 
-        if isinstance(location, Index):
-            frame = o['frame']
-            index = location.value
-            code_to_push_value = ""
-            if isinstance(const_type, (IntType, FloatType, BoolType, StringType)):
-                code_to_push_value = self.emit.emitPUSHCONST(str(evaluated_value), const_type, frame)
-            elif isinstance(const_type, (ArrayType, StructType)):
-                code, _ = self.visit(evaluated_value, o)
-                code_to_push_value = code
-            elif evaluated_value is None:
-                code_to_push_value = self.emit.emitPUSHNULL(frame)
-            
-        self.emit.printout(code_to_push_value)
-        self.emit.printout(self.emit.emitWRITEVAR(ast.conName, const_type, index, frame))
+        index = location.value
+        init_code, _ = self.visit(ast.iniExpr, o)
+        emitter.printout(init_code)
+        emitter.printout(self.emit.emitWRITEVAR(ast.conName, const_type, index, frame))
         return o
 
     def visitFuncDecl(self, ast, o):
@@ -393,6 +322,149 @@ class CodeGenerator(BaseVisitor,Utils):
                 statements_to_visit.append(member)
                 emitter.printout(emitter.emitVAR(index, member.conName, const_type, frame.getStartLabel(), frame.getEndLabel(), frame))
             
+
+    def visitIf(self, ast, o):
+        emitter = o['emitter']
+        frame = o['frame']
+
+        cond_code, _ = self.visit(ast.expr, o)
+        emitter.printout(cond_code)
+
+        label_end = frame.getNewLabel() # Label after the entire if/else structure
+        # Label to jump to else condition is false. If no else, jump directly to end.
+        label_false_target = frame.getNewLabel() if ast.elseStmt else label_end
+        emitter.printout(emitter.emitIFFALSE(label_false_target, frame))
+
+        self.visit(ast.thenStmt, o)
+
+        if ast.elseStmt:
+            emitter.printout(emitter.emitGOTO(label_end, frame))
+            emitter.printout(emitter.emitLABEL(label_false_target, frame))
+            self.visit(ast.elseStmt, o)
+        
+        emitter.printout(emitter.emitLABEL(label_end, frame))
+
+    
+    def visitForBasic(self, ast, o):
+        emitter = o['emitter']
+        frame = o['frame']
+
+        # Label for the start of the condition check (top of the loop)
+        label_condition = frame.getNewLabel()
+        # Label for the instruction immediately after the loop exits
+        label_exit = frame.getNewLabel()
+
+        frame.enterLoop(label_condition, label_exit)
+        emitter.printout(emitter.emitLABEL(label_condition, frame))
+
+        cond_code, _ = self.visit(ast.cond, o)
+        emitter.printout(cond_code)
+
+        emitter.printout(emitter.emitIFFALSE(label_exit, frame))
+        self.visit(ast.loop, o)
+
+        emitter.printout(emitter.emitGOTO(label_condition, frame))
+        emitter.printout(emitter.emitLABEL(label_exit, frame))
+        frame.exitLoop()
+
+    
+    def visitForStep(self, ast, o):
+        emitter = o['emitter']
+        frame = o['frame']
+
+        # Condition check label
+        label_condition = frame.getNewLabel()
+        # Update label
+        label_update = frame.getNewLabel()
+        # Exit label
+        label_exit = frame.getNewLabel()
+
+        local_symbols_for_loop = []
+        env_for_loop = {'env': [local_symbols_for_loop] + o['env'],
+                        'frame': frame,
+                        'emitter': emitter}
+
+        self.visit(ast.init, env_for_loop)
+        frame.enterLoop(label_update, label_exit)
+        emitter.printout(emitter.emitLABEL(label_condition, frame))
+
+        cond_code, _ = self.visit(ast.cond, env_for_loop)
+        emitter.printout(cond_code)
+        emitter.printout(emitter.emitIFFALSE(label_exit, frame))
+        self.visit(ast.loop, env_for_loop)
+
+        emitter.printout(emitter.emitLABEL(label_update, frame))
+        self.visit(ast.upda, env_for_loop)
+        emitter.printout(emitter.emitGOTO(label_condition, frame))
+        emitter.printout(emitter.emitLABEL(label_exit, frame))
+        frame.exitLoop()
+
+
+    def visitForEach(self, ast, o):
+        emitter = o['emitter']
+        frame = o['frame']
+
+        idx_sym = None
+        idx_name = ast.idx.name
+        if idx_name is not '_':
+            idx_sym = self.lookup(idx_name, [j for i in o['env'] for j in i], lambda x: x.name)
+        value_sym = self.lookup(ast.value.name, [j for i in o['env'] for j in i], lambda x: x.name)
+
+        arr_code, arr_type = self.visit(ast.arr, o)
+        emitter.printout(arr_code)
+        element_type = arr_type.eleType
+
+        # Store array reference and get length
+        emitter.printout(emitter.emitDUP(frame))
+        temp_array_ref_idx = frame.getNewIndex()
+        emitter.printout(emitter.emitWRITEVAR("temp_arr_foreach", arr_type, temp_array_ref_idx, frame))
+        emitter.printout(emitter.emitARRAYLENGTH(arr_type, frame))
+        temp_length_idx = frame.getNewIndex()
+        emitter.printout(emitter.emitWRITEVAR("temp_len_foreach", IntType(), temp_length_idx, frame))
+
+        # Initialize hidden index counter to 0
+        temp_counter_idx = frame.getNewIndex()
+        emitter.printout(emitter.emitPUSHICONST(0, frame))
+        emitter.printout(emitter.emitWRITEVAR("temp_idx_foreach", IntType(), temp_counter_idx, frame))
+
+        # Labels
+        label_condition = frame.getNewLabel()
+        label_continue = frame.getNewLabel()
+        label_exit = frame.getNewLabel()
+
+        frame.enterLoop(label_continue, label_exit)
+        emitter.printout(emitter.emitLABEL(label_condition, frame))
+        # Check if index < length
+        emitter.printout(emitter.emitREADVAR("temp_idx_foreach", IntType(), temp_counter_idx, frame))
+        emitter.printout(emitter.emitREADVAR("temp_len_foreach", IntType(), temp_length_idx, frame))
+        emitter.printout(emitter.emitIF_ICMPGE(label_exit, frame))
+
+        # Assign current counter value to 'idx' variable (IF NOT BLANK)
+        if idx_sym:
+            emitter.printout(emitter.emitREADVAR("temp_idx_foreach", IntType(), temp_counter_idx, frame))
+            if isinstance(idx_sym.value, Index):
+                emitter.printout(emitter.emitWRITEVAR(idx_name, IntType(), idx_sym.value.value, frame))
+            elif isinstance(idx_sym.value, CName):
+                emitter.printout(emitter.emitPUTSTATIC(f"{idx_sym.value.value}/{idx_name}", IntType(), frame))
+
+        # Assign current element value to the pre-declared 'value' variable
+        emitter.printout(emitter.emitREADVAR("temp_arr_foreach", arr_type, temp_array_ref_idx, frame))
+        emitter.printout(emitter.emitREADVAR("temp_idx_foreach", IntType(), temp_counter_idx, frame))
+        emitter.printout(emitter.emitALOAD(element_type, frame))
+        if isinstance(value_sym.value, Index):
+            emitter.printout(emitter.emitWRITEVAR(value_sym.name, element_type, value_sym.value.value, frame))
+        elif isinstance(value_sym.value, CName):
+            emitter.printout(emitter.emitPUTSTATIC(f"{value_sym.value.value}/{value_sym.name}", element_type, frame))
+
+        # Body
+        self.visit(ast.loop, o)
+        emitter.printout(emitter.emitLABEL(label_continue, frame))
+        # Increment hidden counter
+        emitter.printout(emitter.emitIINC(temp_counter_idx, 1, frame))
+        emitter.printout(emitter.emitGOTO(label_condition, frame))
+        emitter.printout(emitter.emitLABEL(label_exit, frame))
+        frame.exitLoop()
+
 
     def visitBreak(self, ast, o):
         frame = o['frame']
