@@ -103,19 +103,14 @@ class Emitter():
         #typ: Type
         #frame: Frame
         
-        if isinstance(typ, IntType):
+        if isinstance(typ, (IntType, BoolType)):
             return self.emitPUSHICONST(in_, frame)
         elif isinstance(typ, FloatType):
             return self.emitPUSHFCONST(in_, frame)
-        elif isinstance(typ, BoolType):
-            frame.push()
-            if in_:
-                return self.jvm.emitICONST(1)
-            else:
-                return self.jvm.emitICONST(0)
         elif isinstance(typ, StringType):
             frame.push()
-            return self.jvm.emitLDC(in_)
+            escaped_str = in_.replace('\\', '\\\\').replace('"', '\\"')
+            return self.jvm.emitLDC(f'"{escaped_str}"')
         else:
             raise IllegalOperandException(in_)
         
@@ -337,6 +332,43 @@ class Emitter():
         if not isinstance(typ.rettype, VoidType):
             frame.push()
         return self.jvm.emitINVOKEVIRTUAL(lexeme, self.getJVMType(in_))
+
+
+    def emitINVOKEINTERFACE(self, qualifiedName, methodMType, frame):
+        # qualifiedName: String (e.g., "MyInterface/myMethod")
+        # methodMType: MType (AST representation of method signature)
+        # frame: Frame
+
+        # Calculate num_arg_slots based on parameter types
+        num_arg_slots = 0
+        for param_type in methodMType.partype:
+            if isinstance(param_type, FloatType): # Floats/Doubles take 2 slots
+                 num_arg_slots += 2
+            else:
+                 num_arg_slots += 1
+
+        # Calculate the 'count' operand for invokeinterface
+        # count = 1 (for objectref) + sum of slots for all arguments
+        count_operand = 1 + num_arg_slots
+        # Simulate stack changes (pop args, pop objref, push return)
+        for _ in range(num_arg_slots):
+            frame.pop()
+        frame.pop() # Pop objectref
+
+        if not isinstance(methodMType.rettype, VoidType):
+            # Adjust push size if return type is float/double
+            if isinstance(methodMType.rettype, FloatType):
+                frame.push()
+                frame.push()
+            else:
+                frame.push()
+        jvm_descriptor = self.getJVMType(methodMType)
+
+        # Call JasminCode method with the calculated count
+        indent = self.jvm.INDENT if hasattr(self.jvm, 'INDENT') else "    "
+        endline = self.jvm.END if hasattr(self.jvm, 'END') else "\n"
+        instruction = f"{indent}invokeinterface {qualifiedName}{jvm_descriptor} {count_operand}{endline}"
+        return instruction
 
 
     '''
@@ -668,12 +700,14 @@ class Emitter():
     *   @param index the index of the local variable.
     *   @param in the type of the local array variable.
     '''
-    def emitNEWARRAY(self, elementType):
+    def emitNEWARRAY(self, elementType, frame):
         # elementType: Type (the AST Type node of the elements in the array dimension)
         # frame: Frame
         # Before stack: ..., size -> After stack: ..., arrayref (after allocation opcode)
         # Assumes integer size for this dimension is already on the stack BEFORE calling.
 
+        frame.pop()
+        frame.push()  # Push the array reference onto the stack
         if isinstance(elementType, IntType):
             return self.jvm.emitNEWARRAY("int")
         elif isinstance(elementType, FloatType):
@@ -696,12 +730,11 @@ class Emitter():
             frame.pop()
         frame.push()
         return self.jvm.emitMULTIANEWARRAY(jvm_array_descriptor, num_dims)
-    
+
 
     def emitIINC(self, index, amount, frame):
         # index: int - The index of the local variable to increment
         # amount: int - The amount to increment by (usually 1 or -1)
-        # frame: Frame - Passed for consistency, though iinc doesn't touch the operand stack
         return self.jvm.emitIINC(index, amount)
     
 
@@ -857,14 +890,19 @@ class Emitter():
     *   .class public MPC.CLASSNAME<p>
     *   .super java/lang/Object<p>
     '''
-    def emitPROLOG(self, name, parent):
+    def emitPROLOG(self, name, parent, is_interface=False):
         #name: String
         #parent: String
 
         result = list()
         result.append(self.jvm.emitSOURCE(name + ".java"))
-        result.append(self.jvm.emitCLASS("public " + name))
-        result.append(self.jvm.emitSUPER("java/lang/Object" if parent == "" else parent))
+        if is_interface:
+            interface_directive = f".interface public abstract {name}\n"
+            result.append(interface_directive)
+            result.append(self.jvm.emitSUPER("java/lang/Object"))
+        else:
+            result.append(self.jvm.emitCLASS("public " + name))
+            result.append(self.jvm.emitSUPER("java/lang/Object" if parent == "" else parent))
         return ''.join(result)
 
 
